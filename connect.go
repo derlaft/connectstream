@@ -30,7 +30,7 @@ func (ce *ConnectError) fixReadClosedErr() {
 	if ce.CopyA != nil && strings.Contains(ce.CopyA.Error(), searchSubstr) {
 		ce.CopyA = nil
 	}
-	if ce.CopyB != nil && strings.Contains(ce.CopyA.Error(), searchSubstr) {
+	if ce.CopyB != nil && strings.Contains(ce.CopyB.Error(), searchSubstr) {
 		ce.CopyB = nil
 	}
 }
