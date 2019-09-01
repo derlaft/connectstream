@@ -27,10 +27,10 @@ func (ce *ConnectError) fixReadClosedErr() {
 
 	var searchSubstr = "use of closed network connection"
 
-	if ce.CopyA != nil && strings.Contains(ce.CopyA.Error(), searchSubstr) {
+	if ce.CopyA != nil && strings.Contains(ce.CopyA.Error(), searchSubstr) || ce.CopyA == io.ErrClosedPipe {
 		ce.CopyA = nil
 	}
-	if ce.CopyB != nil && strings.Contains(ce.CopyB.Error(), searchSubstr) {
+	if ce.CopyB != nil && strings.Contains(ce.CopyB.Error(), searchSubstr) || ce.CloseB == io.ErrClosedPipe {
 		ce.CopyB = nil
 	}
 }
