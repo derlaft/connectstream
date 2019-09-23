@@ -5,63 +5,37 @@ import (
 	"io"
 	"strings"
 	"sync"
+
+	"github.com/hashicorp/go-multierror"
 )
 
-// ConnectError wrapps all possible errors that may be possible while connecting two streams
-type ConnectError struct {
-	CloseA error
-	CloseB error
-	CopyA  error
-	CopyB  error
+type closeWriter interface {
+	CloseWrite() error
 }
 
-func (ce *ConnectError) isError() bool {
-	return ce.CloseA != nil || ce.CloseB != nil || ce.CopyA != nil || ce.CopyB != nil
+type closeReader interface {
+	CloseRead() error
 }
 
-func (ce *ConnectError) fixReadClosedErr() {
+func responsibleCopy(a, b io.ReadWriteCloser, wg *sync.WaitGroup, errors chan<- error) {
 
-	// Unfortunately, this error is unexported
-	// so there is no other way to check for this error %)
-	// https://github.com/golang/go/issues/4373
+	defer wg.Done()
+	defer fmt.Println("wat")
 
-	var searchSubstr = "use of closed network connection"
+	_, err := io.Copy(a, b)
+	errors <- err
 
-	if ce.CopyA != nil && strings.Contains(ce.CopyA.Error(), searchSubstr) || ce.CopyA == io.ErrClosedPipe {
-		ce.CopyA = nil
-	}
-	if ce.CopyB != nil && strings.Contains(ce.CopyB.Error(), searchSubstr) || ce.CloseB == io.ErrClosedPipe {
-		ce.CopyB = nil
-	}
-}
-
-func (ce *ConnectError) Error() string {
-
-	var errorParts []string
-
-	if ce.CopyA != nil {
-		errorParts = append(errorParts, fmt.Sprintf("while copy A<-B: %v", ce.CopyA))
+	if cw, ok := b.(closeWriter); ok {
+		errors <- cw.CloseWrite()
+	} else {
+		errors <- b.Close()
 	}
 
-	if ce.CopyB != nil {
-		errorParts = append(errorParts, fmt.Sprintf("while copy B<-A: %v", ce.CopyB))
+	if cw, ok := a.(closeReader); ok {
+		errors <- cw.CloseRead()
+	} else {
+		errors <- a.Close()
 	}
-
-	if ce.CloseA != nil {
-		errorParts = append(errorParts, fmt.Sprintf("while closing A: %v", ce.CloseA))
-	}
-
-	if ce.CloseB != nil {
-		errorParts = append(errorParts, fmt.Sprintf("while closing B: %v", ce.CloseB))
-	}
-
-	return fmt.Sprintf("Got %v errors while connecting two streams: %v",
-		len(errorParts),
-		strings.Join(errorParts, ", "))
-}
-
-func closeStreams(a, b io.Closer) (error, error) {
-	return a.Close(), b.Close()
 }
 
 // Connect connects two streams using io.Copy
@@ -70,37 +44,40 @@ func closeStreams(a, b io.Closer) (error, error) {
 func Connect(a, b io.ReadWriteCloser) error {
 
 	var (
-		errors    ConnectError
-		wg        sync.WaitGroup
-		closeOnce sync.Once
-		doClose   = func() {
-			closeOnce.Do(func() {
-				errors.CloseA, errors.CloseB = closeStreams(a, b)
-			})
-		}
+		wg     sync.WaitGroup
+		errors = make(chan error, 32)
 	)
 
 	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		defer doClose()
-
-		_, errors.CopyA = io.Copy(a, b)
-	}()
-
-	go func() {
-		defer wg.Done()
-		defer doClose()
-
-		_, errors.CopyB = io.Copy(b, a)
-	}()
-
+	go responsibleCopy(a, b, &wg, errors)
+	go responsibleCopy(b, a, &wg, errors)
 	wg.Wait()
 
-	if errors.fixReadClosedErr(); errors.isError() {
-		return &errors
+	errors <- a.Close()
+	errors <- b.Close()
+
+	close(errors)
+
+	var resultError *multierror.Error
+	var closedConn = "use of closed network connection"
+	var endpointNotConnected = "transport endpoint is not connected"
+
+	for err := range errors {
+
+		if err == nil || err == io.ErrClosedPipe {
+			continue
+		}
+
+		if strings.Contains(err.Error(), closedConn) {
+			continue
+		}
+
+		if strings.Contains(err.Error(), endpointNotConnected) {
+			continue
+		}
+
+		resultError = multierror.Append(resultError, err)
 	}
 
-	return nil
+	return resultError.ErrorOrNil()
 }
